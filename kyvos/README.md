@@ -1,40 +1,72 @@
 # Kyvos CI/CD (Cloud Build)
 
-Versioned Kyvos objects (`kyvos/dev`, `kyvos/qa`, `kyvos/prod`) plus a Cloud
-Build pipeline that promotes them dev -> qa -> prod through the Kyvos CICD
-Utility.
+Versioned Kyvos capsules (`kyvos/dev`, `kyvos/qa`, `kyvos/prod`, each holding
+`.cap` files) plus a Cloud Build pipeline that deploys them dev -> qa -> prod
+through the Kyvos CICD Utility.
 
 **Assumption**: the Kyvos server is a GCE VM in the same GCP project as
 Cloud Build, reached over IAP (no public IP, no manually-managed SSH keys).
-If that's wrong (on-prem server, different cloud, etc.), the `copy-objects`
-/ `run-import` steps in `cloudbuild/cloudbuild-cd.yaml` need to change to a
-different transport (e.g. a Cloud Build private pool peered into your VPC,
-or a self-hosted runner) -- everything else in this runbook still applies.
+If that's wrong, the `copy-objects` / `run-import` steps in
+`cloudbuild/cloudbuild-cd.yaml` need a different transport (a Cloud Build
+private pool peered into your VPC, or a self-hosted runner) -- everything
+else in this runbook still applies.
 
-## How it works day to day
+## Current reality: export is manual, import can be automated
 
-1. Someone changes an object in the Kyvos DEV UI.
-2. They run the export script **on the Kyvos server** and commit the result:
+Today, exporting an object out of Kyvos only works through the web UI
+(Entities > pick an object > Export), which downloads a `.cap` capsule file
+to your laptop. There is no CLI export command in use yet. So the pipeline
+is split into two phases:
+
+- **Phase 1 (works right now, no CLI needed): version what you export.**
+  Every `.cap` you download gets committed to Git. That alone gives you
+  history, diffable commit messages, and a rollback point -- the biggest
+  win, and it needs nothing below.
+- **Phase 2 (needs one thing from you): automate the deploy.** The Kyvos
+  CICD Utility is installed on the server and can very likely run
+  headless (that's the whole point of a "CICD utility" vs. the UI) -- we
+  just don't have its exact command syntax yet. Get it once, and CD to
+  QA/PROD becomes a Cloud Build trigger instead of you clicking Import in
+  the UI three times.
+
+### Getting the CLI syntax (do this once)
+SSH into the Kyvos server and find the utility (likely alongside the
+Kyvos install, e.g. `/opt/kyvos/...`), then run its help:
+```bash
+find / -iname "*cicd*util*" 2>/dev/null
+/path/to/KyvosCICDUtility.sh -help
+```
+Paste that output back so `kyvos/scripts/kyvos_import.sh` and
+`kyvos/config/import-*.properties` can be corrected -- right now the
+`-operation`, `-capFile`, `-configFile` flags in that script are
+placeholders.
+
+## Day-to-day workflow
+
+**Phase 1 -- today:**
+1. Export an object from the Kyvos UI -> `.cap` lands in your Downloads.
+2. Run the helper to place it correctly and print the git commands:
    ```
-   PROJECT_ID=<your-project> kyvos/scripts/kyvos_export.sh --env dev --out-dir /tmp/kyvos-dev-export
-   # copy /tmp/kyvos-dev-export contents into kyvos/dev/ in this repo
-   git add kyvos/dev && git commit -m "kyvos: describe the change" && git push
+   kyvos/scripts/add_export.sh --env dev --cap-file ~/Downloads/whatever.cap
    ```
-3. Push to `dev` branch triggers **CI** (`cloudbuild-ci.yaml`): validates the
-   exported files are well-formed.
-4. CI passing triggers **CD** (`cloudbuild-cd.yaml`, `_ENV=dev`): copies
-   `kyvos/dev/` to the server and runs the import utility against the DEV
-   Kyvos instance -- this keeps DEV itself in sync with what's in Git, so
-   Git is always the source of truth.
-5. When ready to promote: open a PR `dev` -> `qa`. Merging triggers CI+CD
-   for QA, gated by a manual approval (see below). Same for `qa` -> `prod`.
-6. **Rollback**: `git revert` (or check out an older commit) on the target
-   branch and push -- CD re-deploys that older version.
+3. `git add`, `git commit` (describe what changed), `git push` as it tells you.
+4. Push to `dev` triggers **CI** (`cloudbuild-ci.yaml`): confirms a real,
+   non-empty capsule was committed.
+5. To promote: open a PR `dev` -> `qa`, then `qa` -> `prod`. For now, after
+   merging, manually import that same `.cap` via the Kyvos UI into QA/PROD
+   (until Phase 2 is wired up).
 
-## One-time GCP setup
+**Phase 2 -- once you have the real CLI flags:**
+6. Merging to `qa` or `prod` also triggers **CD** (`cloudbuild-cd.yaml`):
+   Cloud Build copies `kyvos/<env>/*.cap` to the server over IAP and runs
+   `kyvos_import.sh`, which calls the utility once per capsule -- gated by
+   a manual approval on qa/prod (see setup below).
+7. **Rollback**: `git revert` (or check out an older commit) on the target
+   branch, push, and CD re-imports that older `.cap`.
 
-Run these once (replace `PROJECT_ID`, `VM_NAME`, `VM_ZONE`, `REPO_OWNER` /
-connection name with your real values).
+## One-time GCP setup (Phase 2)
+
+Run these once (replace `PROJECT_ID`, `VM_NAME`, `VM_ZONE`).
 
 ### 1. Enable APIs
 ```bash
@@ -88,15 +120,14 @@ gcloud compute firewall-rules create allow-iap-ssh \
 ```
 
 ### 5. Put the utility + scripts on the Kyvos VM
-Copy `kyvos/scripts/` and `kyvos/config/` from this repo onto the VM at
-`/opt/kyvos/cicd-utility/{scripts,config}`, alongside the existing
-`KyvosCICDUtility.sh` installation (adjust `KYVOS_UTIL_HOME` in the scripts
-if yours lives elsewhere). `gcloud secrets` CLI must be installed/available
-on the VM (it ships with the Cloud SDK).
+Copy `kyvos/scripts/kyvos_import.sh` and `kyvos/config/import-*.properties`
+from this repo onto the VM at `/opt/kyvos/cicd-utility/{scripts,config}`,
+alongside the existing `KyvosCICDUtility.sh` install (adjust
+`KYVOS_UTIL_HOME` in the script if yours lives elsewhere).
+`gcloud secrets` (Cloud SDK) must be available on the VM.
 
 ### 6. Connect the GitHub repo and create triggers
 ```bash
-# One-time: connect the repo via Console (Cloud Build > Repositories) or:
 gcloud builds connections create github kyvos-connection --region=REGION --project=PROJECT_ID
 gcloud builds repositories create dataset-repo \
   --connection=kyvos-connection --region=REGION --project=PROJECT_ID \
@@ -139,10 +170,10 @@ or approve it from the Cloud Build console (Console > Cloud Build >
 History > the pending build > Approve).
 
 ## What's still a placeholder here
-- `objects.list` in `config/export-dev.properties` and the `-operation`,
-  `-configFile`, `-exportPath`/`-importPath` flag names in the two scripts
-  are based on commonly documented `KyvosCICDUtility.sh` usage. Confirm
-  against `KyvosCICDUtility.sh -help` on your server and adjust if the
-  flag names differ on your installed version.
+- The `-operation`, `-capFile`, `-configFile` flags in
+  `kyvos/scripts/kyvos_import.sh` are guesses based on commonly documented
+  Kyvos CICD Utility usage. Get the real ones from `KyvosCICDUtility.sh
+  -help` on your server (see "Getting the CLI syntax" above) and update
+  the script.
 - `targetSchema` values in `config/import-*.properties` are placeholders --
   set them to your real DEV/QA/PROD schema names.
