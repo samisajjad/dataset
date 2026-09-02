@@ -1,0 +1,48 @@
+# CD pipeline: deploys kyvos/<env>/ to the Kyvos server for that environment.
+#
+# Assumes the Kyvos server is a GCE VM reachable via IAP (no public IP or
+# manual SSH keys needed) with:
+#   - OS Login enabled on the VM
+#   - The Cloud Build service account granted roles/iap.tunnelResourceAccessor
+#     and roles/compute.osLogin (see kyvos/README.md)
+#   - The VM's own service account granted roles/secretmanager.secretAccessor
+#     on the kyvos-<env>-{host,user,password} secrets
+#
+# QA and prod triggers should have manual approval required (set on the
+# trigger itself, see kyvos/README.md) -- this file is identical for all
+# three environments, only the _ENV substitution changes.
+steps:
+  - id: copy-objects
+    name: gcr.io/cloud-builders/gcloud
+    args:
+      - compute
+      - scp
+      - --recurse
+      - --zone=${_VM_ZONE}
+      - --project=${_VM_PROJECT}
+      - --tunnel-through-iap
+      - 'kyvos/${_ENV}'
+      - '${_VM_NAME}:/tmp/kyvos-deploy-${_ENV}'
+
+  - id: run-import
+    name: gcr.io/cloud-builders/gcloud
+    args:
+      - compute
+      - ssh
+      - '${_VM_NAME}'
+      - --zone=${_VM_ZONE}
+      - --project=${_VM_PROJECT}
+      - --tunnel-through-iap
+      - >-
+        --command=PROJECT_ID=${_VM_PROJECT}
+        bash /opt/kyvos/cicd-utility/scripts/kyvos_import.sh
+        --env ${_ENV} --in-dir /tmp/kyvos-deploy-${_ENV}
+
+substitutions:
+  _ENV: dev
+  _VM_NAME: kyvos-server
+  _VM_ZONE: us-central1-a
+  _VM_PROJECT: '$PROJECT_ID'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
