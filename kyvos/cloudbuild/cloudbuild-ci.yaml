@@ -1,7 +1,7 @@
-# CI pipeline: validates exported Kyvos objects on every push.
-# Trigger this on branches: dev, qa, prod (one trigger per branch, see kyvos/README.md).
+# CI pipeline: validates entity XML files on every push.
+# One trigger per branch: dev, qa, prod (see kyvos/README.md).
 steps:
-  - id: validate-exports
+  - id: validate-entities
     name: python:3.11-slim
     entrypoint: bash
     args:

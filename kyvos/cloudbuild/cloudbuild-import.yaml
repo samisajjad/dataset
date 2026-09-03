@@ -1,0 +1,35 @@
+# Triggered on push/merge to a promotion branch (qa or prod). Cloud Build
+# has already checked out that branch into /workspace, so kyvos/<env>/
+# already holds the entity XML files -- this replaces the Jenkins
+# checkout-then-launch steps from the official Kyvos runbook with Cloud
+# Build's own trigger + workspace checkout, then calls the Import Utility
+# exactly as ImportKyvosEntities.sh expects: a local folder path + REST
+# creds for the target Kyvos deployment.
+steps:
+  - id: run-import
+    name: '${_UTILITY_IMAGE}'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cp "kyvos/config/input-import-${_ENV}.json" /opt/kyvos-cicd/Input/input.json
+        cd /opt/kyvos-cicd
+        ./ImportKyvosEntities.sh "/workspace/kyvos/${_ENV}" "$$KYVOS_USER" "$$KYVOS_PASSWORD" "$$KYVOS_URL"
+    secretEnv: ['KYVOS_URL', 'KYVOS_USER', 'KYVOS_PASSWORD']
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/${PROJECT_ID}/secrets/kyvos-${_ENV}-url/versions/latest
+      env: 'KYVOS_URL'
+    - versionName: projects/${PROJECT_ID}/secrets/kyvos-${_ENV}-user/versions/latest
+      env: 'KYVOS_USER'
+    - versionName: projects/${PROJECT_ID}/secrets/kyvos-${_ENV}-password/versions/latest
+      env: 'KYVOS_PASSWORD'
+
+substitutions:
+  _ENV: qa
+  _UTILITY_IMAGE: us-central1-docker.pkg.dev/PROJECT_ID/kyvos/cicd-utility:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY

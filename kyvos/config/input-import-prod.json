@@ -1,0 +1,14 @@
+{
+  "EXPORT": {
+    "SEMANTIC_MODELS": "N",
+    "DATASET_RELATIONSHIPS": "N",
+    "DATASETS": "N",
+    "WB": "N"
+  },
+  "GIT_DETAILS": {
+    "GIT_PUSH": "N"
+  },
+  "IMPORT": {
+    "ENTITIES_SELECTION": "ALL"
+  }
+}

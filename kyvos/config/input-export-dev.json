@@ -1,0 +1,36 @@
+{
+  "EXPORT": {
+    "SEMANTIC_MODELS": "Y",
+    "SEMANTIC_MODEL_DETAILS": {},
+    "SEMANTIC_MODEL_SUPPORTING_OBJECTS": {
+      "ADVANCE_PROPERTIES": "Y",
+      "CACHE_POPULATION_RULES": "Y",
+      "AGGREGATES": "Y",
+      "DATASECURITY_RULES": "Y",
+      "DATASECURITY_RULE_MAPPINGS": "N",
+      "AI_SETTINGS": "Y"
+    },
+    "DATASET_RELATIONSHIPS": "Y",
+    "DATASET_RELATIONSHIP_DETAILS": {},
+    "DATASETS": "Y",
+    "DATASET_DETAILS": {},
+    "DATASET_SUPPORTING_OBJECTS": {
+      "ADVANCE_PROPERTIES": "N"
+    },
+    "WB": "N",
+    "WB_DETAILS": {}
+  },
+  "GIT_DETAILS": {
+    "GIT_LOCAL_REPO_PATH": "/workspace/gitrepo",
+    "GIT_USER_NAME": "REPLACE_WITH_GITHUB_USERNAME",
+    "GIT_FEATURE_BRANCH_NAME": "kyvos-dev-export",
+    "GIT_PUSH": "Y",
+    "GIT_FEATURE_BRANCH_CLEAN": "N",
+    "GIT_REPO_NAME": "dataset",
+    "GIT_TOKEN": "REPLACED_AT_RUNTIME_FROM_SECRET_MANAGER",
+    "GIT_URL": "https://github.com/samisajjad/dataset.git"
+  },
+  "IMPORT": {
+    "ENTITIES_SELECTION": "ALL"
+  }
+}
