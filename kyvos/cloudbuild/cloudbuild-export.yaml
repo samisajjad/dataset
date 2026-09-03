@@ -1,0 +1,54 @@
+# Runs the Kyvos Export Utility against Kyvos DEV and pushes the exported
+# entity XML straight to the kyvos-dev-export branch on GitHub (the Export
+# Utility does this git push itself -- Cloud Build just gives it network
+# access to Kyvos DEV and a place to run).
+#
+# This is NOT triggered by a git push (nothing in the repo changes to cause
+# an export -- entities change inside Kyvos). Trigger it on a schedule via
+# Cloud Scheduler, or run manually with:
+#   gcloud builds submit --config=kyvos/cloudbuild/cloudbuild-export.yaml --no-source
+#
+# After a run, review the kyvos-dev-export branch and merge it into `dev`
+# -- that merge is the reviewed, versioned baseline everything else
+# promotes from.
+steps:
+  - id: patch-git-token
+    name: gcr.io/cloud-builders/gcloud
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        apt-get -qq update && apt-get -qq install -y jq >/dev/null
+        jq --arg token "$$GIT_TOKEN" '.GIT_DETAILS.GIT_TOKEN = $$token' \
+          kyvos/config/input-export-dev.json > /workspace/input-export-dev.json
+    secretEnv: ['GIT_TOKEN']
+
+  - id: run-export
+    name: '${_UTILITY_IMAGE}'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        cp /workspace/input-export-dev.json /opt/kyvos-cicd/Input/input.json
+        cd /opt/kyvos-cicd
+        ./ExportKyvosEntities.sh "$$KYVOS_URL" "$$KYVOS_USER" "$$KYVOS_PASSWORD"
+    secretEnv: ['KYVOS_URL', 'KYVOS_USER', 'KYVOS_PASSWORD']
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/${PROJECT_ID}/secrets/kyvos-dev-url/versions/latest
+      env: 'KYVOS_URL'
+    - versionName: projects/${PROJECT_ID}/secrets/kyvos-dev-user/versions/latest
+      env: 'KYVOS_USER'
+    - versionName: projects/${PROJECT_ID}/secrets/kyvos-dev-password/versions/latest
+      env: 'KYVOS_PASSWORD'
+    - versionName: projects/${PROJECT_ID}/secrets/kyvos-git-token/versions/latest
+      env: 'GIT_TOKEN'
+
+substitutions:
+  _UTILITY_IMAGE: us-central1-docker.pkg.dev/PROJECT_ID/kyvos/cicd-utility:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY
