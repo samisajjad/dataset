@@ -1,44 +1,97 @@
-# Kyvos CI/CD (Cloud Build, replacing GitLab+Jenkins)
+# Kyvos CI/CD (GCP: Cloud Build, Secret Manager, Scheduler, Artifact Registry)
 
-Kyvos's own CI/CD Utility (Java-based, REST API driven) does the real work:
-**Export Utility** pulls entities (Semantic Models, Dataset Relationships,
-Datasets, Workbooks) out of a Kyvos deployment as XML and pushes them to
-Git; **Import Utility** reads entity XML from a local folder and pushes it
-into a target Kyvos deployment over REST. Kyvos's official runbook wires
-these up with GitLab + Jenkins. We don't have either -- this repo wires the
-same two scripts up with **GitHub + Cloud Build** instead:
+Two ways Kyvos gets objects out of a deployment, and this repo supports
+both -- use whichever you actually have access to today, switch to the
+other later with no rework:
 
-- Jenkins's job (detect a push, check out the changed files, run
-  `ImportKyvosEntities.sh`) is exactly what a **Cloud Build trigger**
-  already does natively -- no Jenkins needed.
-- The Export Utility's own `git push` doesn't fire from a git event (Kyvos
-  changes happen inside Kyvos, not in the repo) -- it runs on a
-  **Cloud Scheduler cadence** instead, pushing to a review branch.
+| | **Phase 1 -- works today** | **Phase 2 -- needs one more thing** |
+|---|---|---|
+| Export mechanism | Kyvos UI "Export All Objects" dialog (Entities > Export), manual click, downloads a `.cab` (Cabinet archive) | Official CI/CD Utility (`ExportKyvosEntities.sh`), headless, Java + REST API |
+| Where it runs | Your laptop | Cloud Build, on a schedule |
+| Versioning | You commit the `.cab` to Git yourself | The utility pushes to Git itself |
+| Deploy to QA/PROD | Manual: a Kyvos admin uploads the same `.cab` via the Kyvos UI's Import dialog | Automated: Cloud Build runs `ImportKyvosEntities.sh` on every push to `qa`/`prod` |
+| What's missing | Nothing -- usable right now | The Kyvos CI/CD Utility bundle (zip) from Kyvos support -- **check with your Kyvos admin whether your org already has it** |
+
+Both phases share the same Git repo, branches (`dev`/`qa`/`prod`), and CI
+validation -- Phase 2 just automates the two manual steps Phase 1 still
+has (export-to-git, and import-to-target).
 
 ## Layout
 ```
 kyvos/
-  cicd-utility/         Dockerfile + build script for the Cloud Build image
-                         that carries Java + git + the Kyvos utility bundle
+  cicd-utility/           Phase 2: Dockerfile + build script for the Cloud
+                           Build image (Java + git + the Kyvos utility bundle)
   config/
-    input-export-dev.json     what to export from DEV, and where to push it
-    input-import-qa.json      what to import into QA (ALL, from the folder Cloud Build checks out)
-    input-import-prod.json    same, for PROD
+    input-export-dev.json     Phase 2: what to export from DEV, and where to push it
+    input-import-qa.json      Phase 2: what to import into QA
+    input-import-prod.json    Phase 2: same, for PROD
   cloudbuild/
-    cloudbuild-ci.yaml        validates entity XML on every push
-    cloudbuild-export.yaml    runs Export Utility against Kyvos DEV (scheduled)
-    cloudbuild-import.yaml    runs Import Utility against QA or PROD (triggered)
-  scripts/validate.sh         the actual CI check
-  dev/ qa/ prod/               where exported entity XML lands, per environment
+    cloudbuild-ci.yaml        Both phases: validates entity files (.xml/.cab) on every push
+    cloudbuild-export.yaml    Phase 2: runs Export Utility against Kyvos DEV (scheduled)
+    cloudbuild-import.yaml    Phase 2: runs Import Utility against QA or PROD (triggered)
+  scripts/
+    add_export.sh            Phase 1: stages a downloaded .cab into the repo + prints git commands
+    validate.sh               Both phases: the actual CI check
+  dev/ qa/ prod/             Where exported entities land (.cab and/or .xml), per environment
 ```
 
-## One-time setup
+## Phase 1 -- set up now (no vendor bundle needed)
 
-### 1. Get the utility bundle and build the Cloud Build image
-The Kyvos CI/CD Utility zip is vendor software -- it's not in this repo.
-Download it from your Kyvos support portal, upload it to a GCS bucket you
-control, then:
+### 1. Enable APIs
 ```bash
+gcloud services enable cloudbuild.googleapis.com --project=PROJECT_ID
+```
+
+### 2. Connect the GitHub repo and create CI triggers
+```bash
+gcloud builds connections create github kyvos-connection --region=REGION --project=PROJECT_ID
+gcloud builds repositories create dataset-repo \
+  --connection=kyvos-connection --region=REGION --project=PROJECT_ID \
+  --remote-uri=https://github.com/samisajjad/dataset.git
+
+for ENV in dev qa prod; do
+  gcloud builds triggers create github \
+    --name="kyvos-ci-${ENV}" --project=PROJECT_ID --region=REGION \
+    --repository=dataset-repo --branch-pattern="^${ENV}$" \
+    --build-config=kyvos/cloudbuild/cloudbuild-ci.yaml \
+    --substitutions=_ENV=${ENV}
+done
+```
+
+### 3. Day-to-day workflow (Phase 1)
+1. In Kyvos DEV, use Entities > Export > "Export All Objects", fill in
+   Name/Author/Version/Description, click **Export & Download** -- a
+   `.cab` lands in your Downloads.
+2. Stage it into the repo:
+   ```
+   kyvos/scripts/add_export.sh --env dev --file ~/Downloads/Dev.cab
+   ```
+3. `git add`, `git commit` (reuse the Description you typed in Kyvos as
+   the commit message), `git push` as the script tells you.
+4. Push to `dev` triggers **CI** (`cloudbuild-ci.yaml`) -- confirms the
+   `.cab` is present and not corrupt.
+5. To promote: PR `dev` -> `qa`. After merge, a Kyvos admin manually opens
+   the Kyvos QA UI's Import dialog and uploads that same `.cab` (choose
+   Overwrite unless you specifically mean to remove objects, in which
+   case use the Delete option from the Export dialog when the package was
+   created). Same for `qa` -> `prod`.
+6. **Rollback**: check out the `.cab` from an older commit and re-import it
+   via the UI the same way.
+
+This gets you real version history, PR review, and a validated promotion
+path today -- the only manual step left is the actual upload into
+QA/PROD, which Phase 2 automates.
+
+## Phase 2 -- once you have the CI/CD Utility bundle
+
+### 1. Get the bundle and build the Cloud Build image
+Ask your Kyvos admin for the CI/CD Utility zip (Conf/, Input/, Lib/,
+`ExportKyvosEntities.sh`, `ImportKyvosEntities.sh`). It's vendor software,
+not committed to this repo -- upload it to a GCS bucket you control, then:
+```bash
+gcloud services enable secretmanager.googleapis.com artifactregistry.googleapis.com \
+  cloudscheduler.googleapis.com --project=PROJECT_ID
+
 BUNDLE_GCS_PATH=gs://your-bucket/kyvos-cicd-utility.zip \
 IMAGE=us-central1-docker.pkg.dev/PROJECT_ID/kyvos/cicd-utility:latest \
   kyvos/cicd-utility/build-image.sh
@@ -46,21 +99,14 @@ IMAGE=us-central1-docker.pkg.dev/PROJECT_ID/kyvos/cicd-utility:latest \
 Re-run this whenever Kyvos ships a new utility version.
 
 ### 2. Confirm network reachability
-Both the Export Utility (against Kyvos DEV) and Import Utility (against
-QA/PROD) call `<KYVOS_URL>/rest/...` directly from inside the Cloud Build
-step -- there's no SSH hop. If your Kyvos server isn't reachable from
-Cloud Build's default pool (e.g. it's on a private network), you'll need
-a [Cloud Build private pool](https://cloud.google.com/build/docs/private-pools/private-pools-overview)
+Both utilities call `<KYVOS_URL>/rest/...` directly from inside the Cloud
+Build step -- there's no SSH hop. If your Kyvos server isn't reachable
+from Cloud Build's default pool (e.g. it's on a private network), you'll
+need a [Cloud Build private pool](https://cloud.google.com/build/docs/private-pools/private-pools-overview)
 peered into that network, and to add `pool: {name: ...}` under `options`
 in each `cloudbuild-*.yaml`.
 
-### 3. Enable APIs
-```bash
-gcloud services enable cloudbuild.googleapis.com secretmanager.googleapis.com \
-  artifactregistry.googleapis.com cloudscheduler.googleapis.com --project=PROJECT_ID
-```
-
-### 4. Store credentials in Secret Manager
+### 3. Store credentials in Secret Manager
 ```bash
 for ENV in dev qa prod; do
   # KYVOS_URL must include /rest/, e.g. https://kyvos.yourcompany.com/rest/
@@ -85,22 +131,8 @@ done
 Use a Kyvos account with **administrative privileges** for these (per
 Kyvos's own recommendation, needed to import/export all entity types).
 
-### 5. Connect the GitHub repo and create triggers
+### 4. Create the export/import triggers
 ```bash
-gcloud builds connections create github kyvos-connection --region=REGION --project=PROJECT_ID
-gcloud builds repositories create dataset-repo \
-  --connection=kyvos-connection --region=REGION --project=PROJECT_ID \
-  --remote-uri=https://github.com/samisajjad/dataset.git
-
-# CI: validate entity XML on every push, one trigger per branch
-for ENV in dev qa prod; do
-  gcloud builds triggers create github \
-    --name="kyvos-ci-${ENV}" --project=PROJECT_ID --region=REGION \
-    --repository=dataset-repo --branch-pattern="^${ENV}$" \
-    --build-config=kyvos/cloudbuild/cloudbuild-ci.yaml \
-    --substitutions=_ENV=${ENV}
-done
-
 # Import: triggered on push to qa/prod, manual approval required
 for ENV in qa prod; do
   gcloud builds triggers create github \
@@ -110,11 +142,8 @@ for ENV in qa prod; do
     --substitutions=_ENV=${ENV},_UTILITY_IMAGE=us-central1-docker.pkg.dev/PROJECT_ID/kyvos/cicd-utility:latest \
     --require-approval
 done
-```
 
-### 6. Schedule the Export job
-```bash
-# A manual (non-branch) trigger that cloudbuild-export.yaml runs from
+# Export: a manual (non-branch) trigger, fired on a schedule
 gcloud builds triggers create manual \
   --name="kyvos-export-dev" --project=PROJECT_ID --region=REGION \
   --repository=dataset-repo --branch=dev \
@@ -130,45 +159,39 @@ gcloud scheduler jobs create http kyvos-export-dev-nightly \
   --http-method=POST \
   --oauth-service-account-email="$(gcloud projects describe PROJECT_ID --format='value(projectNumber)')-compute@developer.gserviceaccount.com"
 ```
-Or just run it on demand: `gcloud builds triggers run kyvos-export-dev --branch=dev --region=REGION --project=PROJECT_ID`.
+Or run the export on demand: `gcloud builds triggers run kyvos-export-dev --branch=dev --region=REGION --project=PROJECT_ID`.
 
-## Day-to-day workflow
-1. Someone changes an object in Kyvos DEV.
-2. The nightly (or on-demand) export job runs `ExportKyvosEntities.sh`
+### Day-to-day workflow (Phase 2)
+1. The nightly (or on-demand) export job runs `ExportKyvosEntities.sh`
    against Kyvos DEV, which writes XML into `kyvos/dev/` and pushes it
    itself to the `kyvos-dev-export` branch.
-3. Review the diff on `kyvos-dev-export`, open a PR into `dev`, merge.
-4. Push to `dev` triggers **CI** (`cloudbuild-ci.yaml`) -- confirms the XML
-   is well-formed.
-5. Promote: PR `dev` -> `qa`. Merging triggers CI *and* the **Import**
-   pipeline (`cloudbuild-import.yaml`, `_ENV=qa`), gated by manual approval
-   -- it calls `ImportKyvosEntities.sh` against Kyvos QA using exactly the
-   files Cloud Build just checked out into `kyvos/qa/`. Same for `qa` -> `prod`.
-6. **Rollback**: `git revert` (or check out an older commit) on `qa`/`prod`
+2. Review the diff, open a PR into `dev`, merge -- triggers CI.
+3. Promote: PR `dev` -> `qa`. Merging triggers CI *and* the **Import**
+   pipeline, gated by manual approval -- it calls `ImportKyvosEntities.sh`
+   against Kyvos QA using the files Cloud Build just checked out. Same for
+   `qa` -> `prod`.
+4. **Rollback**: `git revert` (or check out an older commit) on `qa`/`prod`
    and push/re-run the trigger -- Import re-applies that older XML.
 
-## Approving a QA/PROD deploy
+## Approving a QA/PROD deploy (Phase 2)
 ```bash
 gcloud builds list --project=PROJECT_ID --filter='status=PENDING_APPROVAL'
 gcloud builds approve BUILD_ID --project=PROJECT_ID
 ```
 
-## What's still unverified (test on a real run before trusting this in prod)
+## What's still unverified in Phase 2 (test on a real run before trusting this in prod)
 - **GitHub vs GitLab for the Export Utility's git push**: Kyvos's doc only
   documents GitLab/Bitbucket. The utility appears to just shell out to
   plain `git` with a token-based HTTPS remote, which should work
   identically against GitHub, but this hasn't been confirmed against your
-  actual utility build -- test `cloudbuild-export.yaml` once and check
-  whether it successfully pushes to `kyvos-dev-export` on GitHub.
-- **Exact XML folder layout** Export Utility writes under
-  `GIT_LOCAL_REPO_PATH` (e.g. whether it creates `SemanticModels/`,
-  `Datasets/` subfolders) -- `validate.sh` searches recursively
-  (`kyvos/<env>/**/*.xml`) so it doesn't assume a specific layout, but
-  confirm after your first real export.
+  actual utility build.
+- **Exact XML folder layout** the Export Utility writes -- `validate.sh`
+  searches recursively (`kyvos/<env>/**/*.xml`) so it doesn't assume a
+  specific layout, but confirm after your first real export.
 - **Java version**: the Dockerfile uses a Java 11 JRE as a reasonable
-  default for a modern enterprise Java utility -- if the bundle needs a
-  different version, adjust the base image in `kyvos/cicd-utility/Dockerfile`.
-- Whether `${_ENV}` substitution resolves correctly inside
+  default -- adjust `kyvos/cicd-utility/Dockerfile` if the bundle needs
+  something else.
+- Whether `${_ENV}` substitution resolves inside
   `availableSecrets.secretManager[].versionName` in your Cloud Build
   version -- if a trigger fails on secret access, hardcode three separate
   `cloudbuild-import-<env>.yaml` files instead of parameterizing.

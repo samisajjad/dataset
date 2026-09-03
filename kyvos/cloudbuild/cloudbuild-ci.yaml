@@ -1,12 +1,14 @@
-# CI pipeline: validates entity XML files on every push.
+# CI pipeline: validates entity files (.xml and/or .cab) on every push.
 # One trigger per branch: dev, qa, prod (see kyvos/README.md).
 steps:
   - id: validate-entities
     name: python:3.11-slim
     entrypoint: bash
     args:
-      - kyvos/scripts/validate.sh
-      - '${_ENV}'
+      - -c
+      - |
+        apt-get -qq update && apt-get -qq install -y cabextract >/dev/null
+        bash kyvos/scripts/validate.sh "${_ENV}"
 
 substitutions:
   _ENV: dev
